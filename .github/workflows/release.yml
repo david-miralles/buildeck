@@ -12,8 +12,7 @@ jobs:
   build:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Aumentamos el tiempo total del job por si acaso
-    timeout-minutes: 60 
+    timeout-minutes: 40 
     strategy:
       matrix:
         include:
@@ -22,7 +21,7 @@ jobs:
             OUT_FILE_NAME: Buildeck-Windows.zip
           - os: macos-latest
             TARGET: macos
-            OUT_FILE_NAME: Buildeck-macOS.zip
+            OUT_FILE_NAME: Buildeck.dmg 
 
     steps:
     - name: Checkout Code
@@ -57,6 +56,7 @@ jobs:
       if: matrix.TARGET == 'macos'
       run: |
         echo "Signing Buildeck.app..."
+        # Firmamos el .app antes de empaquetarlo
         codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "Developer ID Application" dist/Buildeck.app
 
     # --- WINDOWS: ZIP ---
@@ -64,26 +64,34 @@ jobs:
       if: matrix.TARGET == 'windows'
       run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS: ZIP ---
-    - name: Zip Release (macOS)
+    # --- MACOS: CREATE DMG (NUEVO) ---
+    - name: Create DMG (macOS)
       if: matrix.TARGET == 'macos'
       run: |
-        /usr/bin/ditto -c -k --keepParent dist/Buildeck.app ${{ matrix.OUT_FILE_NAME }}
+        echo "Creating DMG..."
+        # Creamos el DMG directamente desde la carpeta del .app
+        hdiutil create -volname "Buildeck Installer" -srcfolder dist/Buildeck.app -ov -format UDZO ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS: NOTARIZATION (FIXED) ---
-    - name: Notarize macOS App
+    # --- MACOS: NOTARIZATION (DMG) ---
+    - name: Notarize macOS DMG
       if: matrix.TARGET == 'macos'
-      # Le damos 45 minutos explícitos a este paso
-      timeout-minutes: 45 
+      timeout-minutes: 30
       run: |
-        echo "Submitting to Apple Notary Service..."
-        # Quitamos el --timeout interno y añadimos --verbose
+        echo "Submitting DMG to Apple Notary Service..."
+        # Enviamos el DMG, no el ZIP
         xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
           --apple-id "${{ secrets.APPLE_ID }}" \
           --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
           --team-id "${{ secrets.APPLE_TEAM_ID }}" \
           --wait \
           --verbose
+
+    # --- MACOS: STAPLE TICKET (OPCIONAL PERO RECOMENDADO) ---
+    - name: Staple Ticket
+      if: matrix.TARGET == 'macos'
+      run: |
+        echo "Stapling ticket to DMG..."
+        xcrun stapler staple ${{ matrix.OUT_FILE_NAME }}
 
     # --- RELEASE ---
     - name: Upload Release Assets
