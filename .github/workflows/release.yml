@@ -3,8 +3,7 @@ name: Build and Release Multi-Platform
 on:
   push:
     tags:
-      - 'v*' # Trigger on tags like v1.0.0
-  workflow_dispatch:
+      - 'v*' # Se ejecuta al crear un tag (ej: v1.0.1)
 
 permissions:
   contents: write
@@ -18,14 +17,10 @@ jobs:
         include:
           - os: windows-latest
             TARGET: windows
-            CMD_BUILD: pyinstaller Buildeck.spec
             OUT_FILE_NAME: Buildeck-Windows.zip
-            ASSET_MIME: application/zip
           - os: macos-latest
             TARGET: macos
-            CMD_BUILD: pyinstaller Buildeck.spec
             OUT_FILE_NAME: Buildeck-macOS.zip
-            ASSET_MIME: application/zip
 
     steps:
     - name: Checkout Code
@@ -34,7 +29,7 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.11' # Usa una versión estable
         cache: 'pip'
 
     - name: Install Dependencies
@@ -43,7 +38,7 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    # --- MACOS SPECIFIC: IMPORT CERTIFICATE ---
+    # --- MACOS: IMPORT CERTIFICATES ---
     - name: Import Code-Signing Certificates
       if: matrix.TARGET == 'macos'
       uses: apple-actions/import-codesign-certs@v2
@@ -51,80 +46,41 @@ jobs:
         p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
         p12-password: ${{ secrets.P12_PASSWORD }}
 
-    # --- BUILD ---
-    - name: Build Executable
-      run: ${{ matrix.CMD_BUILD }}
+    # --- BUILD (Common) ---
+    - name: Build with PyInstaller
+      run: pyinstaller Buildeck.spec
 
-    # --- MACOS SPECIFIC: VERIFY & SIGN ---
-    
-    # 1. DEBUG STEP: List available identities to confirm import worked
-    - name: Verify Certificate Import
-      if: matrix.TARGET == 'macos'
-      run: |
-        echo "Listing keychains..."
-        security list-keychains
-        echo "Finding identities..."
-        security find-identity -v -p codesigning
-
-    # 2. SIGN STEP: Use generic selector "Developer ID Application"
+    # --- MACOS: SIGNING ---
     - name: Sign macOS App
       if: matrix.TARGET == 'macos'
       run: |
         echo "Signing Buildeck.app..."
-        # We use "Developer ID Application" as a generic selector.
-        # Since this runner only has YOUR cert installed, it will pick it automatically.
+        # Firmamos con "Developer ID Application" (el certificado importado)
         codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "Developer ID Application" dist/Buildeck.app
 
-    # --- ZIP PACKAGING ---
+    # --- WINDOWS: ZIP ---
     - name: Zip Release (Windows)
       if: matrix.TARGET == 'windows'
       run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
 
+    # --- MACOS: ZIP FOR NOTARIZATION ---
+    # Apple notariza el ZIP, no el .app suelto
     - name: Zip Release (macOS)
       if: matrix.TARGET == 'macos'
       run: |
-        # Use ditto for preserving resource forks/permissions on Mac
         /usr/bin/ditto -c -k --keepParent dist/Buildeck.app ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS SPECIFIC: NOTARIZATION (MEJORADO) ---
+    # --- MACOS: NOTARIZATION (SIMPLIFICADO) ---
     - name: Notarize macOS App
       if: matrix.TARGET == 'macos'
-      timeout-minutes: 30
       run: |
-        echo "Submitting to Apple Notary Service (No Wait)..."
-        
-        OUTPUT=$(xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
+        echo "Submitting to Apple Notary Service..."
+        xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
           --apple-id "${{ secrets.APPLE_ID }}" \
           --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
           --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-          --no-wait \
-          --output-format json)
-        
-        SUBMISSION_ID=$(echo "$OUTPUT" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
-        echo "Submission ID: $SUBMISSION_ID"
-        
-        echo "Waiting for processing..."
-        while true; do
-          STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
-            --apple-id "${{ secrets.APPLE_ID }}" \
-            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
-            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-            --output-format json)
-          
-          STATUS=$(echo "$STATUS_OUTPUT" | python3 -c "import sys, json; print(json.load(sys.stdin)['status'])")
-          echo "Current status: $STATUS"
-          
-          if [ "$STATUS" == "Accepted" ]; then
-            echo "✅ Notarization Accepted!"
-            break
-          elif [ "$STATUS" == "Invalid" ] || [ "$STATUS" == "Rejected" ]; then
-            echo "❌ Notarization Failed!"
-            echo "$STATUS_OUTPUT"
-            exit 1
-          fi
-          
-          sleep 30
-        done
+          --wait \
+          --timeout 10m
 
     # --- RELEASE ---
     - name: Upload Release Assets
