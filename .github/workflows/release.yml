@@ -55,16 +55,25 @@ jobs:
     - name: Build Executable
       run: ${{ matrix.CMD_BUILD }}
 
-    # --- MACOS SPECIFIC: CODE SIGNING ---
+    # --- MACOS SPECIFIC: VERIFY & SIGN ---
+    
+    # 1. DEBUG STEP: List available identities to confirm import worked
+    - name: Verify Certificate Import
+      if: matrix.TARGET == 'macos'
+      run: |
+        echo "Listing keychains..."
+        security list-keychains
+        echo "Finding identities..."
+        security find-identity -v -p codesigning
+
+    # 2. SIGN STEP: Use generic selector "Developer ID Application"
     - name: Sign macOS App
       if: matrix.TARGET == 'macos'
-      env:
-        # The exact name that appears in Keychain Access
-        IDENTITY: "Developer ID Application: ${{ secrets.APPLE_TEAM_ID }}" 
       run: |
         echo "Signing Buildeck.app..."
-        # Sign the entire bundle with entitlements and hardened runtime
-        codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "${{ secrets.APPLE_ID }}" dist/Buildeck.app
+        # We use "Developer ID Application" as a generic selector.
+        # Since this runner only has YOUR cert installed, it will pick it automatically.
+        codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "Developer ID Application" dist/Buildeck.app
 
     # --- ZIP PACKAGING ---
     - name: Zip Release (Windows)
