@@ -6,3 +6,9 @@ __pycache__/
 *.json
 !cache_cards.json
 scryfall_oracle_cards.json
+.DS_Store
+cache_card.json
+*.py[cod]
+build/
+dist/
+*.spec
