@@ -1,10 +1,10 @@
 """
 This module provides a Scryfall API repository implementation for retrieving Magic: The Gathering card data.
 """
-import requests
 import json
 import os
-import threading
+import requests
+
 from typing import Optional, Any, Callable
 from src.core.interfaces import CardRepository
 from src.data.cache_manager import CacheManager
@@ -156,11 +156,59 @@ class ScryfallRepository(CardRepository):
         return self._parse_card_data(card_json)
 
     def _parse_card_data(self, data: dict) -> dict[str, Any]:
-        return {
+        """
+        Parses Scryfall JSON into internal format.
+        Robust logic for Split/Transform/MDFC and Standard cards.
+        """
+        parsed = {
             "name": data.get("printed_name") or data.get("name"),
             "mana": data.get("mana_cost", ""),
             "type": data.get("printed_type_line") or data.get("type_line"),
             "desc": data.get("printed_text") or data.get("oracle_text", ""),
-            "pt": f"{data.get('power', '?')}/{data.get('toughness', '?')}" 
-                  if "power" in data else "N/A"
+            "pt": "N/A"
         }
+
+        # Handle Power/Toughness for single cards
+        if "power" in data and "toughness" in data:
+             parsed["pt"] = f"{data['power']}/{data['toughness']}"
+
+        # --- MULTI-FACE LOGIC (Split, Transform, MDFC) ---
+        if "card_faces" in data:
+            faces = data["card_faces"]
+            
+            # 1. MANA: Try to combine faces. If empty (e.g. lands), fallback to root.
+            mana_list = [f.get("mana_cost", "") for f in faces]
+            combined_mana = " // ".join([m for m in mana_list if m])
+            if combined_mana:
+                parsed["mana"] = combined_mana
+
+            # 2. DESC: Combine text from both faces
+            desc_lines = []
+            for f in faces:
+                name = f.get("printed_name") or f.get("name")
+                text = f.get("printed_text") or f.get("oracle_text", "")
+                if text:
+                    desc_lines.append(f"[{name}]:\n{text}")
+            
+            if desc_lines:
+                parsed["desc"] = "\n\n--- // ---\n\n".join(desc_lines)
+            
+            # 3. TYPE: usually the root type_line is best (e.g. "Creature // Instant")
+            # But if root is empty, combine faces
+            if not parsed["type"]:
+                 parsed["type"] = " // ".join([f.get("type_line", "") for f in faces])
+
+            # 4. P/T: Combine stats (e.g. "2/2 // -")
+            pt_list = []
+            has_pt = False
+            for f in faces:
+                if "power" in f and "toughness" in f:
+                    pt_list.append(f"{f['power']}/{f['toughness']}")
+                    has_pt = True
+                else:
+                    pt_list.append("-")
+            
+            if has_pt:
+                parsed["pt"] = " // ".join(pt_list)
+
+        return parsed
