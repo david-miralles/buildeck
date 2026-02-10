@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from PyInstaller.utils.hooks import collect_data_files
 
-# 1. Dynamically collect customtkinter data (themes, fonts, etc.)
+is_mac = sys.platform == 'darwin'
+
 datas = [('assets', 'assets')]
 datas += collect_data_files('customtkinter')
 
@@ -33,10 +35,19 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False, # Set to True if you need to see errors in a CMD window
+    console=False, 
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
 )
+
+
+if is_mac:
+    app = BUNDLE(
+        exe,
+        name='Buildeck.app',
+        icon=None, # Si tienes un icono .icns ponlo aquí: 'assets/icon.icns'
+        bundle_identifier=None,
+    )

@@ -1,0 +1,93 @@
+name: Build and Release Multi-Platform
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on tags like v1.0.0
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            TARGET: windows
+            CMD_BUILD: pyinstaller Buildeck.spec
+            OUT_FILE_NAME: Buildeck-Windows.zip
+            ASSET_MIME: application/zip
+          - os: macos-latest
+            TARGET: macos
+            CMD_BUILD: pyinstaller Buildeck.spec
+            OUT_FILE_NAME: Buildeck-macOS.zip
+            ASSET_MIME: application/zip
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    # --- MACOS SPECIFIC: IMPORT CERTIFICATE ---
+    - name: Import Code-Signing Certificates
+      if: matrix.TARGET == 'macos'
+      uses: apple-actions/import-codesign-certs@v2
+      with:
+        p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+        p12-password: ${{ secrets.P12_PASSWORD }}
+
+    # --- BUILD ---
+    - name: Build Executable
+      run: ${{ matrix.CMD_BUILD }}
+
+    # --- MACOS SPECIFIC: CODE SIGNING ---
+    - name: Sign macOS App
+      if: matrix.TARGET == 'macos'
+      env:
+        # The exact name that appears in Keychain Access
+        IDENTITY: "Developer ID Application: ${{ secrets.APPLE_TEAM_ID }}" 
+      run: |
+        echo "Signing Buildeck.app..."
+        # Sign the entire bundle with entitlements and hardened runtime
+        codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "${{ secrets.APPLE_ID }}" dist/Buildeck.app
+
+    # --- ZIP PACKAGING ---
+    - name: Zip Release (Windows)
+      if: matrix.TARGET == 'windows'
+      run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
+
+    - name: Zip Release (macOS)
+      if: matrix.TARGET == 'macos'
+      run: |
+        # Use ditto for preserving resource forks/permissions on Mac
+        /usr/bin/ditto -c -k --keepParent dist/Buildeck.app ${{ matrix.OUT_FILE_NAME }}
+
+    # --- MACOS SPECIFIC: NOTARIZATION ---
+    - name: Notarize macOS App
+      if: matrix.TARGET == 'macos'
+      run: |
+        echo "Submitting to Apple Notary Service..."
+        xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} --apple-id ${{ secrets.APPLE_ID }} --password ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }} --team-id ${{ secrets.APPLE_TEAM_ID }} --wait
+        echo "Notarization complete."
+
+    # --- RELEASE ---
+    - name: Upload Release Assets
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: ${{ matrix.OUT_FILE_NAME }}
