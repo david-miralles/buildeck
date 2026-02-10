@@ -3,7 +3,7 @@ name: Build and Release Multi-Platform
 on:
   push:
     tags:
-      - 'v*' # Se ejecuta al crear un tag (ej: v1.0.1)
+      - 'v*'
 
 permissions:
   contents: write
@@ -12,6 +12,8 @@ jobs:
   build:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Aumentamos el tiempo total del job por si acaso
+    timeout-minutes: 60 
     strategy:
       matrix:
         include:
@@ -29,7 +31,7 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11' # Usa una versión estable
+        python-version: '3.11'
         cache: 'pip'
 
     - name: Install Dependencies
@@ -46,7 +48,7 @@ jobs:
         p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
         p12-password: ${{ secrets.P12_PASSWORD }}
 
-    # --- BUILD (Common) ---
+    # --- BUILD ---
     - name: Build with PyInstaller
       run: pyinstaller Buildeck.spec
 
@@ -55,7 +57,6 @@ jobs:
       if: matrix.TARGET == 'macos'
       run: |
         echo "Signing Buildeck.app..."
-        # Firmamos con "Developer ID Application" (el certificado importado)
         codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "Developer ID Application" dist/Buildeck.app
 
     # --- WINDOWS: ZIP ---
@@ -63,24 +64,26 @@ jobs:
       if: matrix.TARGET == 'windows'
       run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS: ZIP FOR NOTARIZATION ---
-    # Apple notariza el ZIP, no el .app suelto
+    # --- MACOS: ZIP ---
     - name: Zip Release (macOS)
       if: matrix.TARGET == 'macos'
       run: |
         /usr/bin/ditto -c -k --keepParent dist/Buildeck.app ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS: NOTARIZATION (SIMPLIFICADO) ---
+    # --- MACOS: NOTARIZATION (FIXED) ---
     - name: Notarize macOS App
       if: matrix.TARGET == 'macos'
+      # Le damos 45 minutos explícitos a este paso
+      timeout-minutes: 45 
       run: |
         echo "Submitting to Apple Notary Service..."
+        # Quitamos el --timeout interno y añadimos --verbose
         xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
           --apple-id "${{ secrets.APPLE_ID }}" \
           --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
           --team-id "${{ secrets.APPLE_TEAM_ID }}" \
           --wait \
-          --timeout 10m
+          --verbose
 
     # --- RELEASE ---
     - name: Upload Release Assets
