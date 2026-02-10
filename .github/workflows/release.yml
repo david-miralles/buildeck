@@ -3,7 +3,7 @@ name: Build and Release Multi-Platform
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' 
 
 permissions:
   contents: write
@@ -12,7 +12,7 @@ jobs:
   build:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40 
+    timeout-minutes: 60
     strategy:
       matrix:
         include:
@@ -21,7 +21,7 @@ jobs:
             OUT_FILE_NAME: Buildeck-Windows.zip
           - os: macos-latest
             TARGET: macos
-            OUT_FILE_NAME: Buildeck.dmg 
+            OUT_FILE_NAME: Buildeck.dmg
 
     steps:
     - name: Checkout Code
@@ -39,7 +39,7 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    # --- MACOS: IMPORT CERTIFICATES ---
+    # --- MAC: IMPORTAR CERTIFICADOS ---
     - name: Import Code-Signing Certificates
       if: matrix.TARGET == 'macos'
       uses: apple-actions/import-codesign-certs@v2
@@ -47,38 +47,34 @@ jobs:
         p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
         p12-password: ${{ secrets.P12_PASSWORD }}
 
-    # --- BUILD ---
+    # --- BUILD (PyInstaller) ---
+    # Usa Buildeck.spec que contiene la lógica híbrida (Onedir para Mac, Onefile para Windows)
     - name: Build with PyInstaller
       run: pyinstaller Buildeck.spec
 
-    # --- MACOS: SIGNING ---
+    # --- MAC: FIRMA Y EMPAQUETADO ---
     - name: Sign macOS App
       if: matrix.TARGET == 'macos'
       run: |
-        echo "Signing Buildeck.app..."
-        # Firmamos el .app antes de empaquetarlo
+        echo "Signing Buildeck.app bundle..."
+
         codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "Developer ID Application" dist/Buildeck.app
 
-    # --- WINDOWS: ZIP ---
-    - name: Zip Release (Windows)
-      if: matrix.TARGET == 'windows'
-      run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
-
-    # --- MACOS: CREATE DMG (NUEVO) ---
     - name: Create DMG (macOS)
       if: matrix.TARGET == 'macos'
       run: |
+        sleep 2
         echo "Creating DMG..."
-        # Creamos el DMG directamente desde la carpeta del .app
+        
         hdiutil create -volname "Buildeck Installer" -srcfolder dist/Buildeck.app -ov -format UDZO ${{ matrix.OUT_FILE_NAME }}
+        
+        codesign --force --sign "Developer ID Application" ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS: NOTARIZATION (DMG) ---
     - name: Notarize macOS DMG
       if: matrix.TARGET == 'macos'
-      timeout-minutes: 30
+      timeout-minutes: 45
       run: |
         echo "Submitting DMG to Apple Notary Service..."
-        # Enviamos el DMG, no el ZIP
         xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
           --apple-id "${{ secrets.APPLE_ID }}" \
           --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
@@ -86,14 +82,18 @@ jobs:
           --wait \
           --verbose
 
-    # --- MACOS: STAPLE TICKET (OPCIONAL PERO RECOMENDADO) ---
     - name: Staple Ticket
       if: matrix.TARGET == 'macos'
       run: |
-        echo "Stapling ticket to DMG..."
+        echo "Stapling notarization ticket to DMG..."
         xcrun stapler staple ${{ matrix.OUT_FILE_NAME }}
 
-    # --- RELEASE ---
+    # --- WINDOWS: ZIP ---
+    - name: Zip Release (Windows)
+      if: matrix.TARGET == 'windows'
+      run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
+
+    # --- RELEASE DE GITHUB ---
     - name: Upload Release Assets
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
