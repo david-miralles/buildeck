@@ -86,13 +86,45 @@ jobs:
         # Use ditto for preserving resource forks/permissions on Mac
         /usr/bin/ditto -c -k --keepParent dist/Buildeck.app ${{ matrix.OUT_FILE_NAME }}
 
-    # --- MACOS SPECIFIC: NOTARIZATION ---
+    # --- MACOS SPECIFIC: NOTARIZATION (MEJORADO) ---
     - name: Notarize macOS App
       if: matrix.TARGET == 'macos'
+      timeout-minutes: 30
       run: |
-        echo "Submitting to Apple Notary Service..."
-        xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} --apple-id ${{ secrets.APPLE_ID }} --password ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }} --team-id ${{ secrets.APPLE_TEAM_ID }} --wait
-        echo "Notarization complete."
+        echo "Submitting to Apple Notary Service (No Wait)..."
+        
+        OUTPUT=$(xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
+          --apple-id "${{ secrets.APPLE_ID }}" \
+          --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+          --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+          --no-wait \
+          --output-format json)
+        
+        SUBMISSION_ID=$(echo "$OUTPUT" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+        echo "Submission ID: $SUBMISSION_ID"
+        
+        echo "Waiting for processing..."
+        while true; do
+          STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --output-format json)
+          
+          STATUS=$(echo "$STATUS_OUTPUT" | python3 -c "import sys, json; print(json.load(sys.stdin)['status'])")
+          echo "Current status: $STATUS"
+          
+          if [ "$STATUS" == "Accepted" ]; then
+            echo "✅ Notarization Accepted!"
+            break
+          elif [ "$STATUS" == "Invalid" ] || [ "$STATUS" == "Rejected" ]; then
+            echo "❌ Notarization Failed!"
+            echo "$STATUS_OUTPUT"
+            exit 1
+          fi
+          
+          sleep 30
+        done
 
     # --- RELEASE ---
     - name: Upload Release Assets
