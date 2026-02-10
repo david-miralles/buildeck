@@ -11,4 +11,3 @@ cache_card.json
 *.py[cod]
 build/
 dist/
-*.spec
