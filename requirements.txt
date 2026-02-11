@@ -14,3 +14,4 @@ setuptools==82.0.0
 types-pyinstaller==6.18.0.20260115
 types-requests==2.32.4.20260107
 urllib3==2.6.3
+Pillow==10.2.0

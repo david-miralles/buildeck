@@ -25,7 +25,6 @@ class ScryfallRepository(CardRepository):
         self.lang_codes = {"English": "en", "Español": "es"}
         
         # In-memory index for the bulk database
-        # Structure: { "name_lowercase": {card_data} }
         self.bulk_index = {}
         self._load_bulk_index()
 
@@ -39,7 +38,6 @@ class ScryfallRepository(CardRepository):
                     # Create a fast lookup dictionary mapping lowercase names to card data
                     for card in cards:
                         name = card.get("name", "").lower()
-                        # Only store if not present (or overwrite, doesn't matter much for Oracle)
                         self.bulk_index[name] = card
                 print(f"[SYSTEM] Bulk database loaded. {len(self.bulk_index)} cards ready.")
             except Exception as e:
@@ -49,9 +47,6 @@ class ScryfallRepository(CardRepository):
         """
         Downloads the 'Oracle Cards' bulk file from Scryfall.
         Run this in a separate thread.
-        
-        Args:
-            progress_callback: A function(status_text, progress_float) to update UI.
         """
         try:
             # 1. Get the download URL
@@ -59,8 +54,6 @@ class ScryfallRepository(CardRepository):
             meta_response = requests.get(self.bulk_url, timeout=10)
             meta_data = meta_response.json()
             
-            # Find the 'oracle_cards' object (smaller and faster than 'default_cards')
-            # 'oracle_cards' has one entry per unique card mechanic (good for deck building)
             download_uri = None
             for item in meta_data.get("data", []):
                 if item["type"] == "oracle_cards":
@@ -82,11 +75,9 @@ class ScryfallRepository(CardRepository):
                     for chunk in r.iter_content(chunk_size=8192):
                         dl += len(chunk)
                         f.write(chunk)
-                        # Calculate percentage (0.2 to 0.9 range)
                         if total_length:
-                            done = int(50 * dl / total_length)
                             pct = 0.2 + (0.7 * (dl / total_length))
-                            progress_callback(f"Downloading... {done*2}%", pct)
+                            progress_callback(f"Downloading... {int(pct*100)}%", pct)
 
             # 3. Reload into memory
             progress_callback("Indexing data...", 0.95)
@@ -97,26 +88,27 @@ class ScryfallRepository(CardRepository):
             progress_callback(f"Error: {str(e)}", 0)
 
     def get_card_data(self, name: str, lang_name: str = "English") -> Optional[dict[str, Any]]:
+        print(f"\n[REPO] Requesting: {name} ({lang_name})")
         iso_lang = self.lang_codes.get(lang_name, "en")
         
         # 1. Check local small cache (Historical queries)
         cached_data = self.cache.get_card(name, lang_name)
         if cached_data:
+            print(f"[REPO] Found in Cache: {name}")
             return cached_data
 
         # 2. Check Bulk Database (The big offline file)
-        # Note: Bulk data is usually English only. If user asks for Spanish,
-        # we skip this and go to API to find the translation.
+        # Only valid for English usually
         if iso_lang == "en" and name.lower() in self.bulk_index:
-            print(f"[BULK] Found '{name}' in offline database.")
+            print(f"[REPO] Found in Bulk DB: {name}")
             raw_data = self.bulk_index[name.lower()]
             parsed = self._parse_card_data(raw_data)
-            # Save to small cache for consistency
             self.cache.save_card(name, lang_name, parsed)
             return parsed
 
         # 3. Fetch from Scryfall API (Fallback or for Translations)
         try:
+            print(f"[REPO] Fetching from API: {name}...")
             params = {'exact': name}
             response = requests.get(self.base_url, params=params, timeout=10)
 
@@ -132,9 +124,11 @@ class ScryfallRepository(CardRepository):
                     self.cache.save_card(name, lang_name, final_data)
 
                 return final_data
+            else:
+                 print(f"[REPO] API Error {response.status_code} for {name}")
                 
         except requests.RequestException as e:
-            print(f"Error connecting to Scryfall API: {e}")
+            print(f"[REPO] Error connecting to Scryfall API: {e}")
 
         return None
 
@@ -165,8 +159,25 @@ class ScryfallRepository(CardRepository):
             "mana": data.get("mana_cost", ""),
             "type": data.get("printed_type_line") or data.get("type_line"),
             "desc": data.get("printed_text") or data.get("oracle_text", ""),
-            "pt": "N/A"
+            "pt": "N/A",
+            "image_url": None
         }
+
+        # --- IMAGE EXTRACTION LOGIC ---
+        if "image_uris" in data:
+            parsed["image_url"] = data["image_uris"].get("normal")
+        elif "card_faces" in data:
+            # For double-faced cards, try to get the front face image
+            faces = data["card_faces"]
+            if len(faces) > 0 and "image_uris" in faces[0]:
+                parsed["image_url"] = faces[0]["image_uris"].get("normal")
+        
+        # Log URL finding for debug
+        if parsed["image_url"]:
+            # print(f"[REPO] Image URL found: {parsed['image_url']}") # Uncomment if needed
+            pass
+        else:
+            print(f"[REPO] Warning: No image URL found for {parsed['name']}")
 
         # Handle Power/Toughness for single cards
         if "power" in data and "toughness" in data:
@@ -176,13 +187,13 @@ class ScryfallRepository(CardRepository):
         if "card_faces" in data:
             faces = data["card_faces"]
             
-            # 1. MANA: Try to combine faces. If empty (e.g. lands), fallback to root.
+            # 1. MANA
             mana_list = [f.get("mana_cost", "") for f in faces]
             combined_mana = " // ".join([m for m in mana_list if m])
             if combined_mana:
                 parsed["mana"] = combined_mana
 
-            # 2. DESC: Combine text from both faces
+            # 2. DESC
             desc_lines = []
             for f in faces:
                 name = f.get("printed_name") or f.get("name")
@@ -193,12 +204,11 @@ class ScryfallRepository(CardRepository):
             if desc_lines:
                 parsed["desc"] = "\n\n--- // ---\n\n".join(desc_lines)
             
-            # 3. TYPE: usually the root type_line is best (e.g. "Creature // Instant")
-            # But if root is empty, combine faces
+            # 3. TYPE
             if not parsed["type"]:
                  parsed["type"] = " // ".join([f.get("type_line", "") for f in faces])
 
-            # 4. P/T: Combine stats (e.g. "2/2 // -")
+            # 4. P/T
             pt_list = []
             has_pt = False
             for f in faces:

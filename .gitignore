@@ -11,3 +11,4 @@ cache_cards.json
 *.py[cod]
 build/
 dist/
+*.jpg
