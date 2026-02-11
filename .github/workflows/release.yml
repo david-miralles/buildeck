@@ -1,4 +1,4 @@
-nname: Build and Release Multi-Platform
+name: Build and Release Multi-Platform
 
 on:
   push:
