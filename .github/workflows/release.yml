@@ -1,9 +1,9 @@
-name: Build and Release Multi-Platform
+nname: Build and Release Multi-Platform
 
 on:
   push:
     tags:
-      - 'v*' 
+      - 'v*'
 
 permissions:
   contents: write
@@ -12,7 +12,7 @@ jobs:
   build:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
@@ -39,61 +39,51 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    # --- MAC: IMPORTAR CERTIFICADOS ---
-    - name: Import Code-Signing Certificates
+    - name: Import Certificates (Mac)
       if: matrix.TARGET == 'macos'
       uses: apple-actions/import-codesign-certs@v2
       with:
         p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
         p12-password: ${{ secrets.P12_PASSWORD }}
 
-    # --- BUILD (PyInstaller) ---
-    # Usa Buildeck.spec que contiene la lógica híbrida (Onedir para Mac, Onefile para Windows)
+    # --- BUILD ---
     - name: Build with PyInstaller
       run: pyinstaller Buildeck.spec
 
-    # --- MAC: FIRMA Y EMPAQUETADO ---
+    # --- MAC SIGNING & PACKAGING ---
     - name: Sign macOS App
       if: matrix.TARGET == 'macos'
       run: |
         echo "Signing Buildeck.app bundle..."
-
         codesign --deep --force --verbose --options=runtime --entitlements entitlements.plist --sign "Developer ID Application" dist/Buildeck.app
 
-    - name: Create DMG (macOS)
+    - name: Create DMG (Mac)
       if: matrix.TARGET == 'macos'
       run: |
         sleep 2
         echo "Creating DMG..."
-        
         hdiutil create -volname "Buildeck Installer" -srcfolder dist/Buildeck.app -ov -format UDZO ${{ matrix.OUT_FILE_NAME }}
-        
         codesign --force --sign "Developer ID Application" ${{ matrix.OUT_FILE_NAME }}
 
-    - name: Notarize macOS DMG
+    # --- MAC NOTARIZATION (ASYNC MODE) ---
+    - name: Submit to Apple (No Wait)
       if: matrix.TARGET == 'macos'
-      timeout-minutes: 45
       run: |
-        echo "Submitting DMG to Apple Notary Service..."
+        echo "Submitting DMG to Apple Notary Service (Async)..."
+        # Usamos --no-wait. El comando sube el archivo y termina inmediatamente.
         xcrun notarytool submit ${{ matrix.OUT_FILE_NAME }} \
           --apple-id "${{ secrets.APPLE_ID }}" \
           --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
           --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-          --wait \
+          --no-wait \
           --verbose
 
-    - name: Staple Ticket
-      if: matrix.TARGET == 'macos'
-      run: |
-        echo "Stapling notarization ticket to DMG..."
-        xcrun stapler staple ${{ matrix.OUT_FILE_NAME }}
-
-    # --- WINDOWS: ZIP ---
+    # --- WINDOWS PACKAGING ---
     - name: Zip Release (Windows)
       if: matrix.TARGET == 'windows'
       run: powershell Compress-Archive -Path dist/Buildeck.exe -DestinationPath ${{ matrix.OUT_FILE_NAME }}
 
-    # --- RELEASE DE GITHUB ---
+    # --- RELEASE ---
     - name: Upload Release Assets
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
