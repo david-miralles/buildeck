@@ -1,10 +1,13 @@
 import json
 import os
 from datetime import datetime, timedelta
+from src.core.paths import get_user_data_dir
 
 class CacheManager:
     def __init__(self, cache_file="cache_cards.json"):
-        self.cache_file = cache_file
+        # Use the system's secure data directory
+        self.data_dir = get_user_data_dir()
+        self.cache_file = os.path.join(self.data_dir, cache_file)
         self.data = self._load_cache()
 
     def _load_cache(self):
@@ -17,11 +20,10 @@ class CacheManager:
         return {}
 
     def get_card(self, name, lang):
-        # Creamos una clave única que combine nombre e idioma
         key = f"{name}_{lang}".lower()
         if key in self.data:
             cached_item = self.data[key]
-            # Verificar si han pasado más de 24 horas
+            # Check if cache is older than 24 hours
             timestamp = datetime.fromisoformat(cached_item['timestamp'])
             if datetime.now() - timestamp < timedelta(hours=24):
                 return cached_item['payload']
@@ -33,5 +35,8 @@ class CacheManager:
             'timestamp': datetime.now().isoformat(),
             'payload': payload
         }
-        with open(self.cache_file, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, indent=4, ensure_ascii=False)
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"[CACHE ERROR] Could not save cache: {e}")

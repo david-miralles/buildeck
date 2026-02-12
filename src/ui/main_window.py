@@ -12,6 +12,7 @@ import customtkinter as ctk  # type: ignore
 import pyperclip  # type: ignore
 
 from assets.locales import LANGUAGES
+from src.core.paths import get_user_data_dir
 
 class MainWindow(ctk.CTk):
     def __init__(self, card_repo):
@@ -26,12 +27,9 @@ class MainWindow(ctk.CTk):
         self.current_process_token = 0 
         self.selected_button = None    
         
-        # --- MEMORY CACHE (RAM) ---
-        # Stores { "url_string": CTkImage_object }
-        # This prevents garbage collection errors and speeds up navigation
+        # --- RAM Cache for Images ---
         self.ram_image_cache = {}
 
-        # Geometry and Setup
         self.geometry("1100x750")
         self.setup_ui()
         self.update_ui_text()
@@ -331,19 +329,18 @@ class MainWindow(ctk.CTk):
                 writer.writerows(self.extracted_data)
             messagebox.showinfo("Buildeck", lang["msg_save"])
 
-    # --- IMAGE LOGIC (WITH RAM CACHE) ---
+    # --- IMAGE LOGIC (THREAD SAFE + RAM CACHE + SAFE PATHS) ---
     def display_card_image(self, url):
         if not url:
             self.image_label.configure(image=None, text="No Image Available")
             return
 
-        # 1. CHECK RAM CACHE FIRST (Instant Load)
+        # 1. RAM Cache check
         if url in self.ram_image_cache:
             print(f"[UI] Loaded from RAM cache: {url}")
             self.image_label.configure(image=self.ram_image_cache[url], text="")
             return
         
-        # 2. If not in RAM, proceed to load from Disk/Web
         print(f"[UI] Requesting Image: {url}")
         self.current_image_token += 1
         my_token = self.current_image_token
@@ -355,10 +352,14 @@ class MainWindow(ctk.CTk):
                 filename = url.split("/")[-1].split("?")[0]
                 if "." not in filename: filename += ".jpg"
                 
-                cache_dir = os.path.join("cache", "images")
+                # USE SAFE PATH FROM PATHS.PY
+                base_dir = get_user_data_dir()
+                cache_dir = os.path.join(base_dir, "images")
+                
                 cache_path = os.path.join(cache_dir, filename)
                 os.makedirs(cache_dir, exist_ok=True)
 
+                # Check corrupt file
                 if os.path.exists(cache_path):
                     if os.path.getsize(cache_path) == 0:
                         os.remove(cache_path)
@@ -376,12 +377,10 @@ class MainWindow(ctk.CTk):
                 if self.current_image_token != my_token:
                     return
 
-                # Load PIL Image
                 pil_img = Image.open(cache_path)
                 pil_img.load() 
                 
                 print("[UI] Sending PIL image to main thread.")
-                # Pass PIL image AND URL (for caching key) to main thread
                 self.after(0, lambda: self._update_image_label(pil_img, url, my_token))
                 
             except Exception as e:
@@ -392,15 +391,11 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=task, daemon=True).start()
 
     def _update_image_label(self, pil_image, url, token_at_start):
-        # THIS RUNS ON MAIN THREAD
         if self.current_image_token == token_at_start:
             try:
-                # Create CTkImage
                 ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(240, 335))
-                
-                # SAVE TO RAM CACHE (Prevents GC and enables fast reload)
+                # Save to RAM
                 self.ram_image_cache[url] = ctk_image
-                
                 self.image_label.configure(image=ctk_image, text="")
                 print("[UI] Image rendered and cached successfully.")
             except Exception as e:

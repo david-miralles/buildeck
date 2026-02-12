@@ -8,6 +8,7 @@ import requests
 from typing import Optional, Any, Callable
 from src.core.interfaces import CardRepository
 from src.data.cache_manager import CacheManager
+from src.core.paths import get_user_data_dir
 
 class ScryfallRepository(CardRepository):
     """
@@ -19,7 +20,10 @@ class ScryfallRepository(CardRepository):
         self.base_url = "https://api.scryfall.com/cards/named"
         self.search_url = "https://api.scryfall.com/cards/search"
         self.bulk_url = "https://api.scryfall.com/bulk-data"
-        self.bulk_file = "scryfall_oracle_cards.json"
+        
+        # Define secure path for the massive JSON file
+        self.data_dir = get_user_data_dir()
+        self.bulk_file = os.path.join(self.data_dir, "scryfall_oracle_cards.json")
         
         self.cache = CacheManager()
         self.lang_codes = {"English": "en", "Español": "es"}
@@ -31,11 +35,10 @@ class ScryfallRepository(CardRepository):
     def _load_bulk_index(self):
         """Loads the massive JSON file into memory for instant lookups."""
         if os.path.exists(self.bulk_file):
-            print("[SYSTEM] Loading bulk database into memory... this may take a moment.")
+            print(f"[SYSTEM] Loading bulk database from {self.bulk_file}...")
             try:
                 with open(self.bulk_file, 'r', encoding='utf-8') as f:
                     cards = json.load(f)
-                    # Create a fast lookup dictionary mapping lowercase names to card data
                     for card in cards:
                         name = card.get("name", "").lower()
                         self.bulk_index[name] = card
@@ -49,7 +52,6 @@ class ScryfallRepository(CardRepository):
         Run this in a separate thread.
         """
         try:
-            # 1. Get the download URL
             progress_callback("Fetching metadata...", 0.1)
             meta_response = requests.get(self.bulk_url, timeout=10)
             meta_data = meta_response.json()
@@ -64,13 +66,13 @@ class ScryfallRepository(CardRepository):
                 progress_callback("Error: Bulk URI not found.", 0)
                 return
 
-            # 2. Download the huge file stream
             progress_callback("Downloading database...", 0.2)
             with requests.get(download_uri, stream=True) as r:
                 r.raise_for_status()
                 total_length = int(r.headers.get('content-length', 0))
                 dl = 0
                 
+                # Write to the secure path
                 with open(self.bulk_file, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         dl += len(chunk)
@@ -79,7 +81,6 @@ class ScryfallRepository(CardRepository):
                             pct = 0.2 + (0.7 * (dl / total_length))
                             progress_callback(f"Downloading... {int(pct*100)}%", pct)
 
-            # 3. Reload into memory
             progress_callback("Indexing data...", 0.95)
             self._load_bulk_index()
             progress_callback("Database updated!", 1.0)
@@ -91,14 +92,13 @@ class ScryfallRepository(CardRepository):
         print(f"\n[REPO] Requesting: {name} ({lang_name})")
         iso_lang = self.lang_codes.get(lang_name, "en")
         
-        # 1. Check local small cache (Historical queries)
+        # 1. Check local small cache
         cached_data = self.cache.get_card(name, lang_name)
         if cached_data:
             print(f"[REPO] Found in Cache: {name}")
             return cached_data
 
-        # 2. Check Bulk Database (The big offline file)
-        # Only valid for English usually
+        # 2. Check Bulk Database (Offline)
         if iso_lang == "en" and name.lower() in self.bulk_index:
             print(f"[REPO] Found in Bulk DB: {name}")
             raw_data = self.bulk_index[name.lower()]
@@ -106,7 +106,7 @@ class ScryfallRepository(CardRepository):
             self.cache.save_card(name, lang_name, parsed)
             return parsed
 
-        # 3. Fetch from Scryfall API (Fallback or for Translations)
+        # 3. Fetch from Scryfall API
         try:
             print(f"[REPO] Fetching from API: {name}...")
             params = {'exact': name}
@@ -133,7 +133,6 @@ class ScryfallRepository(CardRepository):
         return None
 
     def _get_localized_version(self, card_json: dict, iso_lang: str) -> dict:
-        """Searches for a specific language version using Oracle ID."""
         oracle_id = card_json.get("oracle_id")
         if not oracle_id:
             return self._parse_card_data(card_json)
@@ -150,10 +149,6 @@ class ScryfallRepository(CardRepository):
         return self._parse_card_data(card_json)
 
     def _parse_card_data(self, data: dict) -> dict[str, Any]:
-        """
-        Parses Scryfall JSON into internal format.
-        Robust logic for Split/Transform/MDFC and Standard cards.
-        """
         parsed = {
             "name": data.get("printed_name") or data.get("name"),
             "mana": data.get("mana_cost", ""),
@@ -163,62 +158,43 @@ class ScryfallRepository(CardRepository):
             "image_url": None
         }
 
-        # --- IMAGE EXTRACTION LOGIC ---
+        # --- IMAGE EXTRACTION ---
         if "image_uris" in data:
             parsed["image_url"] = data["image_uris"].get("normal")
         elif "card_faces" in data:
-            # For double-faced cards, try to get the front face image
             faces = data["card_faces"]
             if len(faces) > 0 and "image_uris" in faces[0]:
                 parsed["image_url"] = faces[0]["image_uris"].get("normal")
         
-        # Log URL finding for debug
-        if parsed["image_url"]:
-            # print(f"[REPO] Image URL found: {parsed['image_url']}") # Uncomment if needed
-            pass
-        else:
-            print(f"[REPO] Warning: No image URL found for {parsed['name']}")
-
-        # Handle Power/Toughness for single cards
+        # --- PT Logic ---
         if "power" in data and "toughness" in data:
              parsed["pt"] = f"{data['power']}/{data['toughness']}"
 
-        # --- MULTI-FACE LOGIC (Split, Transform, MDFC) ---
+        # --- Multi-face Logic ---
         if "card_faces" in data:
             faces = data["card_faces"]
             
-            # 1. MANA
             mana_list = [f.get("mana_cost", "") for f in faces]
             combined_mana = " // ".join([m for m in mana_list if m])
-            if combined_mana:
-                parsed["mana"] = combined_mana
+            if combined_mana: parsed["mana"] = combined_mana
 
-            # 2. DESC
             desc_lines = []
             for f in faces:
                 name = f.get("printed_name") or f.get("name")
                 text = f.get("printed_text") or f.get("oracle_text", "")
-                if text:
-                    desc_lines.append(f"[{name}]:\n{text}")
+                if text: desc_lines.append(f"[{name}]:\n{text}")
+            if desc_lines: parsed["desc"] = "\n\n--- // ---\n\n".join(desc_lines)
             
-            if desc_lines:
-                parsed["desc"] = "\n\n--- // ---\n\n".join(desc_lines)
-            
-            # 3. TYPE
             if not parsed["type"]:
                  parsed["type"] = " // ".join([f.get("type_line", "") for f in faces])
 
-            # 4. P/T
             pt_list = []
             has_pt = False
             for f in faces:
                 if "power" in f and "toughness" in f:
                     pt_list.append(f"{f['power']}/{f['toughness']}")
                     has_pt = True
-                else:
-                    pt_list.append("-")
-            
-            if has_pt:
-                parsed["pt"] = " // ".join(pt_list)
+                else: pt_list.append("-")
+            if has_pt: parsed["pt"] = " // ".join(pt_list)
 
         return parsed
